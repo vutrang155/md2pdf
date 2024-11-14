@@ -1,11 +1,12 @@
 //go:generate go run themes/include_themes.go
+//go:generate go run scripts/include_scripts.go
 
 package main
 
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"os"
 
 	"github.com/SebastiaanKlippert/go-wkhtmltopdf"
@@ -21,12 +22,48 @@ func main() {
 	output_file_name := os.Args[2]
 
 	// Read the markdown file
-	markdown, err := ioutil.ReadFile(input_file_name)
+	markdown, err := os.ReadFile(input_file_name)
 	if err != nil {
 		panic(err)
 	}
 
-	// New Markdown to HTML converter
+	html, err := convertMarkdownToHtml(markdown)
+	if err != nil {
+		panic(err)
+	}
+
+	pdf, err := convertHTMLToPDF(html)
+
+	// Write buffer contents to file on disk
+	if err := os.WriteFile(
+		output_file_name,
+		pdf,
+		fs.FileMode(0644)); err != nil {
+		panic(err)
+	}
+}
+
+func convertHTMLToPDF(html string) ([]byte, error) {
+	pdfg, err := wkhtmltopdf.NewPDFGenerator()
+	if err != nil {
+		return nil, err
+	}
+
+	page := wkhtmltopdf.NewPageReader(bytes.NewReader([]byte(html)))
+	page.JavascriptDelay.Set(3000) // Wait for scripts to be loaded
+
+	pdfg.AddPage(page)
+	pdfg.Dpi.Set(300)
+	pdfg.Orientation.Set(wkhtmltopdf.OrientationPortrait)
+
+	if err := pdfg.Create(); err != nil {
+		return nil, err
+	}
+
+	return pdfg.Bytes(), nil
+}
+
+func convertMarkdownToHtml(markdown []byte) (string, error) {
 	markdown_converter := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithParserOptions(
@@ -44,36 +81,30 @@ func main() {
 	// Include the theme and set charset
 	html.WriteString(fmt.Sprintf("<style type=text/css>%s</style>", css))
 	html.WriteString("<meta charset=\"UTF-8\">\n")
+
 	// Div for the content
 	html.WriteString("<div class=\"markdown-body\">\n")
 
 	// Convert Markdown to HTML and save it to the buffer
-	err = markdown_converter.Convert(markdown, &html)
+	err := markdown_converter.Convert(markdown, &html)
 	if err != nil {
-		panic(err)
+		return "", err
 	}
 
 	// Close the content div
 	html.WriteString("</div>")
 
-	// New HTML to PDF converter
-	pdf_generator, err := wkhtmltopdf.NewPDFGenerator()
-	if err != nil {
-		panic(err)
-	}
+	htmlWithMathJax := fmt.Sprintf(`
+	<!DOCTYPE html>
+	<html>
+	<head>
+        %s
+	</head>
+	<body>
+		%s
+	</body>
+	</html>
+	`, MATHJAX_SCRIPT, html.String())
 
-	// Add HTML page from previous step
-	pdf_generator.AddPage(wkhtmltopdf.NewPageReader(bytes.NewReader(html.Bytes())))
-
-	// Create PDF document in internal buffer
-	err = pdf_generator.Create()
-	if err != nil {
-		panic(err)
-	}
-
-	// Write buffer contents to file on disk
-	err = pdf_generator.WriteFile(output_file_name)
-	if err != nil {
-		panic(err)
-	}
+	return htmlWithMathJax, nil
 }
